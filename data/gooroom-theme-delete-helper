@@ -1,35 +1,31 @@
 #!/bin/sh
+# Remove a user theme installed by gooroom-theme-helper.
+# Runs as root through pkexec, so the theme id is the only input and it is
+# validated: no paths, and only themes registered as "[User Theme <id>]" in
+# the control-center theme list are touched.
+set -u
+
+ID="${1:-}"
+case "$ID" in
+  ''|*[!A-Za-z0-9_-]*) echo "invalid theme id" >&2; exit 1 ;;
+esac
+[ "${#ID}" -le 64 ] || { echo "invalid theme id" >&2; exit 1; }
+
 ICONS="/usr/share/icons"
-BACKGROUND="/usr/share/backgrounds/gooroom/gooroom_user_theme_bg_$1.png"
-VALUE="\[User Theme $1\]"
-FILE=$2
+BACKGROUND="/usr/share/backgrounds/gooroom/gooroom_user_theme_bg_${ID}.png"
+FILE="/usr/share/gnome-control-center/themes/gooroom-themes.ini"
 
-if [ -z "$1" ]
-then
-	return
+START=$(sed -n "/^\[User Theme ${ID}\]\$/=" "$FILE" 2>/dev/null | head -n 1)
+if [ -z "$START" ]; then
+  echo "not a user theme: $ID" >&2
+  exit 1
 fi
 
-#remove background
-if [ ! -z "$BACKGROUND" ]
-then
-  rm $BACKGROUND
-  echo "remove background $1"
-fi
-#remove theme in icon theme
-ICON_FILE="$ICONS/$1"
-if [ ! -z "$ICON_FILE" ]
-then
-  rm $ICON_FILE -rf
-  echo "remove icnos theme $1"
-fi
-#remove theme in control theme
-if [ -z "$FILE" ]
-then
-  FILE="/usr/share/gnome-control-center/themes/gooroom-themes.ini"
-fi
-START=$(sed -n "/$VALUE/=" $FILE)
-if [ ! -z "$START" ]
-then
-  END=`expr "$START" "+" 6`
-  sed -i "$START, $END d" $FILE 
-fi
+rm -f -- "$BACKGROUND"
+echo "remove background $ID"
+
+rm -rf -- "${ICONS:?}/${ID}"
+echo "remove icons theme $ID"
+
+END=$((START + 6))
+sed -i "${START},${END}d" "$FILE"

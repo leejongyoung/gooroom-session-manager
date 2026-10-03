@@ -32,18 +32,47 @@ JSON_OBJECT_GET (json_object *root_obj, const char *key)
 	return ret_obj;
 }
 
+/* This helper runs as root through pkexec, so every value that ends up in a
+ * path, a command line or the theme list must be validated here. */
+static gboolean
+is_safe_token (const char *s, gsize max_len)
+{
+	gsize len;
+
+	if (!s || !*s) return FALSE;
+	len = strlen (s);
+	if (len > max_len) return FALSE;
+	for (gsize i = 0; i < len; i++) {
+		if (!(g_ascii_isalnum (s[i]) || s[i] == '_' || s[i] == '-'))
+			return FALSE;
+	}
+	return TRUE;
+}
+
+/* Strip characters that would start a new line or section in an .ini file. */
+static gchar *
+ini_safe (const char *s)
+{
+	gchar *out = g_strdup (s ? s : "");
+	g_strdelimit (out, "\r\n[]", ' ');
+	return out;
+}
+
 static void
 download (char *url, char *dest)
 {
 	gboolean valid = g_uri_is_valid (url, G_URI_FLAGS_NONE, NULL);
 
-	if (!valid) return;
+	if (!valid || !(g_str_has_prefix (url, "https://") || g_str_has_prefix (url, "http://"))) {
+		g_free (url);
+		return;
+	}
 
 	gchar *wget = g_find_program_in_path ("wget");
 	if (wget) {
-		gchar *cmd = g_strdup_printf ("%s --no-check-certificate %s -q -O %s", wget, url, dest);
-		g_spawn_command_line_sync (cmd, NULL, NULL, NULL, NULL);
-		g_free (cmd);
+		/* argv, not a shell string (download options unchanged) */
+		gchar *argv[] = { wget, "--no-check-certificate", "-q", "-O", dest, "--", url, NULL };
+		g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL, NULL, NULL);
 	}
 	g_free (wget);
 	g_free (url);
@@ -52,9 +81,11 @@ download (char *url, char *dest)
 static void
 filecopy (const char *src, const char*dest)
 {
-		gchar *cmd = g_strdup_printf ("cp %s %s", src, dest);
-		g_spawn_command_line_sync (cmd, NULL, NULL, NULL, NULL);
-		g_free (cmd);
+	if (!src || !dest) return;
+
+	g_autoptr(GFile) s = g_file_new_for_path (src);
+	g_autoptr(GFile) d = g_file_new_for_path (dest);
+	g_file_copy (s, d, G_FILE_COPY_OVERWRITE | G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL, NULL, NULL);
 }
 
 static void
@@ -116,6 +147,25 @@ add_theme (char *type, char *data)
 	theme_name = json_object_get_string (obj2);
 	theme_comment = json_object_get_string (obj3);
 
+	if (!is_safe_token (theme_id, 64)) {
+		g_warning ("invalid theme id");
+		return;
+	}
+	if (g_strcmp0 (type, "0") != 0 && g_strcmp0 (type, "1") != 0)
+		return;
+
+	/* Never write into an icon theme that is not one of ours. */
+	{
+		g_autofree gchar *dir = g_build_filename (ICONS_PATH, theme_id, NULL);
+		g_autofree gchar *list = NULL;
+		g_autofree gchar *mark = g_strdup_printf ("[User Theme %s]", theme_id);
+		gboolean registered = g_file_get_contents (THEME_CONTROL_FILE, &list, NULL, NULL) && strstr (list, mark);
+		if (g_file_test (dir, G_FILE_TEST_EXISTS) && !registered) {
+			g_warning ("refusing to overwrite a non-user icon theme");
+			return;
+		}
+	}
+
 	if (obj4) {
 		background_path = g_strdup_printf ("%s/gooroom_user_theme_bg_%s.png", BACKGROUND_PATH, theme_id);
 		theme_background = json_object_get_string (obj4);
@@ -151,10 +201,13 @@ add_theme (char *type, char *data)
 			gchar **tokens = g_strsplit (name, ".", -1);
 			gint length =  g_strv_length (tokens) - 1;
 
-			if (tokens != NULL && tokens[length] != NULL) {
+			fullname = NULL;
+			if (tokens != NULL && length >= 0 && tokens[length] != NULL
+			    && is_safe_token (info, 128) && is_safe_token (tokens[length], 8)) {
 				fullname = g_strdup_printf ("%s.%s", info, tokens[length]);
 			}
 			g_strfreev (tokens);
+			if (!fullname) continue;
 
 			url = json_object_get_string (url_obj);
 			gchar *dest = g_strdup_printf ("%s/%s",icon_path, fullname);
@@ -166,11 +219,13 @@ add_theme (char *type, char *data)
 	if (g_strcmp0 (type, "0") == 0) {
 		//create index file;
 		gchar *index_file = g_strdup_printf ("%s/%s/index.theme",ICONS_PATH, theme_id);
-		gchar *index_template = g_strdup_printf (g_index_template, theme_name, theme_comment);
+		g_autofree gchar *safe_name = ini_safe (theme_name);
+		g_autofree gchar *safe_comment = ini_safe (theme_comment);
+		gchar *index_template = g_strdup_printf (g_index_template, safe_name, safe_comment);
 		create_theme_file_from_data (index_file, index_template, TRUE, FALSE);
 		//control-center theme
 		const gchar *backgroundfile = g_strdup_printf ("file://%s", background_path);
-		gchar *theme_template = g_strdup_printf (g_theme_template, theme_id, theme_id, theme_name, theme_name, theme_name, backgroundfile, theme_id);
+		gchar *theme_template = g_strdup_printf (g_theme_template, theme_id, theme_id, safe_name, safe_name, safe_name, backgroundfile, theme_id);
 		create_theme_file_from_data (g_strdup(THEME_CONTROL_FILE), theme_template, FALSE, TRUE);
 	}
 	//control-center thumbnail
@@ -189,7 +244,7 @@ main(int argc, char **argv)
 	bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
 	textdomain (GETTEXT_PACKAGE);
 
-	if (argc > 1)
+	if (argc > 2)
 		add_theme (argv[1], argv[2]);
 
 	return 0;
