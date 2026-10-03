@@ -26,6 +26,10 @@
 #include <gio/gio.h>
 #include <gio/gdesktopappinfo.h>
 
+#include <pwd.h>
+#include <stdlib.h>
+#include <json-c/json.h>
+
 #include "panel-glib.h"
 
 
@@ -164,25 +168,91 @@ init_blacklist (void)
 	g_list_free_full (all_apps, g_object_unref);
 }
 
+/* This helper runs as root through pkexec, so the list to apply is never
+ * taken from the caller: it is fetched from the root agent, which got it
+ * from the management server. */
+static gchar *
+fetch_blacklist (void)
+{
+	GDBusProxy *proxy;
+	GVariant *reply, *v = NULL;
+	gchar *arg, *data = NULL, *ret = NULL;
+	const gchar *uid_str = g_getenv ("PKEXEC_UID");
+	struct passwd *pw = uid_str ? getpwuid ((uid_t) strtoul (uid_str, NULL, 10)) : NULL;
+
+	if (!pw)
+		return NULL;
+
+	proxy = g_dbus_proxy_new_for_bus_sync (G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL,
+	                                       "kr.gooroom.agent", "/kr/gooroom/agent",
+	                                       "kr.gooroom.agent", NULL, NULL);
+	if (!proxy)
+		return NULL;
+
+	arg = g_strdup_printf ("{\"module\":{\"module_name\":\"config\",\"task\":{\"task_name\":\"get_app_list\",\"in\":{\"login_id\":\"%s\"}}}}",
+	                       pw->pw_name);
+	reply = g_dbus_proxy_call_sync (proxy, "do_task", g_variant_new ("(v)", g_variant_new_string (arg)),
+	                                G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+	g_free (arg);
+	g_object_unref (proxy);
+
+	if (!reply)
+		return NULL;
+	g_variant_get (reply, "(v)", &v);
+	if (v && g_variant_is_of_type (v, G_VARIANT_TYPE_STRING))
+		data = g_variant_dup_string (v, NULL);
+	if (v)
+		g_variant_unref (v);
+	g_variant_unref (reply);
+
+	if (data) {
+		json_object *root = json_tokener_parse (data), *mod, *task, *out, *status, *list;
+		if (root &&
+		    json_object_object_get_ex (root, "module", &mod) &&
+		    json_object_object_get_ex (mod, "task", &task) &&
+		    json_object_object_get_ex (task, "out", &out) &&
+		    json_object_object_get_ex (out, "status", &status) &&
+		    g_strcmp0 (json_object_get_string (status), "200") == 0 &&
+		    json_object_object_get_ex (out, "black_list", &list)) {
+			ret = g_strdup (json_object_get_string (list));
+		}
+		if (root)
+			json_object_put (root);
+		g_free (data);
+	}
+
+	return ret;
+}
+
 int
 main (int argc, char **argv)
 {
+	gchar *list = fetch_blacklist ();
+
+	/* no policy from the agent: change nothing */
+	if (!list)
+		return 1;
+
 	init_blacklist ();
 
-	if (argc > 1) {
-		guint i = 0;
-		for (i = 1; argv[i]; i++) {
-			gchar *full_desktop_id = find_full_desktop_id (argv[i]);
-                        if (full_desktop_id) {
-				g_debug ("Blacklist Destkop = %s", full_desktop_id);
-				if (!g_str_has_suffix (full_desktop_id, "gooroomupdate.desktop")) {
-					/* remove exec permission */
-					make_exec_executable (full_desktop_id, FALSE);
-				}
-				g_free (full_desktop_id);
+	gchar **items = g_strsplit (list, ",", -1);
+	guint i;
+	for (i = 0; items[i]; i++) {
+		gchar *full_desktop_id;
+		if (items[i][0] == '\0')
+			continue;
+		full_desktop_id = find_full_desktop_id (items[i]);
+		if (full_desktop_id) {
+			g_debug ("Blacklist Destkop = %s", full_desktop_id);
+			if (!g_str_has_suffix (full_desktop_id, "gooroomupdate.desktop")) {
+				/* remove exec permission */
+				make_exec_executable (full_desktop_id, FALSE);
 			}
+			g_free (full_desktop_id);
 		}
 	}
+	g_strfreev (items);
+	g_free (list);
 
 	return 0;
 }
