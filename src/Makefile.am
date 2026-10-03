@@ -47,11 +47,13 @@ gooroom_update_blacklist_helper_SOURCES = \
 
 gooroom_update_blacklist_helper_CFLAGS = \
 	$(GLIB_CFLAGS) \
-	$(GIO_UNIX_CFLAGS)
+	$(GIO_UNIX_CFLAGS) \
+	$(JSON_C_CFLAGS)
 
 gooroom_update_blacklist_helper_LDFLAGS = \
 	$(GLIB_LIBS) \
-	$(GIO_UNIX_LIBS)
+	$(GIO_UNIX_LIBS) \
+	$(JSON_C_LIBS)
 
 gooroom_theme_helper_SOURCES = \
 	gooroom-theme-helper.c
