@@ -98,19 +98,30 @@ make_exec_executable (const gchar *full_desktop_id, gboolean executable)
 	GDesktopAppInfo *dt_appinfo;
 
 	dt_appinfo = g_desktop_app_info_new_from_filename (full_desktop_id);
+	if (!dt_appinfo) {
+		g_warning ("Cannot load desktop entry: %s", full_desktop_id);
+		return;
+	}
 
 	exec = g_desktop_app_info_get_string (dt_appinfo, G_KEY_FILE_DESKTOP_KEY_EXEC);
 
 	if (exec) {
 		GStatBuf stat_buf;
-		gchar **argv;
+		gchar **argv = NULL;
+		GError *error = NULL;
 
-		g_shell_parse_argv (exec, NULL, &argv, NULL);
+		if (!g_shell_parse_argv (exec, NULL, &argv, &error)) {
+			g_warning ("Cannot parse Exec for %s: %s", full_desktop_id, error->message);
+			g_clear_error (&error);
+			g_free (exec);
+			g_object_unref (dt_appinfo);
+			return;
+		}
 
 		if (g_strv_length (argv) > 0) {
 			gchar *cmd = g_find_program_in_path (argv[0]);
 
-			if (g_stat (cmd, &stat_buf) == 0) {
+			if (cmd && g_stat (cmd, &stat_buf) == 0) {
 				mode_t perm = stat_buf.st_mode;
 				gboolean cur_exec = perm & S_IXOTH;
 
@@ -129,6 +140,7 @@ make_exec_executable (const gchar *full_desktop_id, gboolean executable)
 			g_free (cmd);
 		}
 		g_strfreev (argv);
+		g_free (exec);
 	}
 
 	if (changed) {
